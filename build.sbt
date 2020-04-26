@@ -11,7 +11,10 @@ val defaultSettings = Defaults.coreDefaultSettings ++ xerial.sbt.Sonatype.sonaty
   baseDirectory in test := file("/out/"),
   fork := true,
 
+  resolvers += "jetbrains" at "https://jetbrains.bintray.com/pty4j",
+
   libraryDependencies += "org.scala-lang" % "scala-library" % SpinalVersion.compiler,
+  libraryDependencies += "org.jetbrains.pty4j" % "pty4j" % "0.9.6",
 
   dependencyOverrides += "net.java.dev.jna" % "jna" % "4.2.2",
   dependencyOverrides += "net.java.dev.jna" % "jna-platform" % "4.2.2",
