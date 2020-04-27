@@ -10,7 +10,7 @@ import scala.collection.mutable.ArrayBuffer
 import sys.process._
 
 
-case class Vivado(vivadoPath: String, family: String, device: String, processorCount: Int = 8) {
+case class Vivado(family: String, device: String, vivadoCmd: String = "vivado", processorCount: Int = 8) {
 
   def writeFile(name: String, dir: String, contents: String): Unit = {
     val f = new java.io.FileWriter(Paths.get(dir,name).toFile)
@@ -172,7 +172,7 @@ case class Vivado(vivadoPath: String, family: String, device: String, processorC
     val scriptName = "run.tcl"
     writeFile(scriptName, directory.getAbsolutePath, script)
 
-    val cmd = Array(s"$vivadoPath/vivado", "-nojournal", "-mode", "batch", "-source", scriptName)
+    val cmd = Array(s"$vivadoCmd", "-nojournal", "-mode", "batch", "-source", scriptName)
 
     Process(cmd, directory) ! ProcessLogger(line => ())
   }
@@ -181,7 +181,6 @@ case class Vivado(vivadoPath: String, family: String, device: String, processorC
 object VivadoTest {
   def main(args: Array[String]) {
     val vivado = Vivado(
-      vivadoPath="/home/evan/apps/xilinx-linux/Vivado/2019.1/bin",
       family="Virtex Ultrascale+",
       device="xcvu9p-fsgd2104-2LV-e"
     )
