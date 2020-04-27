@@ -1,13 +1,13 @@
 package spinal.lib.eda.xilinx
 
 import java.io.File
+import java.lang.NumberFormatException
 import java.nio.file.Paths
-import java.util
-import java.util.Scanner
 
-import com.pty4j.PtyProcess
 import spinal.core._
-import spinal.lib.eda.bench.Report
+
+import scala.collection.mutable.ArrayBuffer
+import scala.sys.process.Process
 
 
 case class Vivado(vivadoPath: String, family: String, device: String, processorCount: Int = 8) {
@@ -18,7 +18,6 @@ case class Vivado(vivadoPath: String, family: String, device: String, processorC
     f.flush();
     f.close();
   }
-
 
   def synthModuleOOC(rtl: File, module: Component, extraOptions: String = "", targetFrequency: HertzNumber = 600 MHz) {
 
@@ -33,17 +32,16 @@ case class Vivado(vivadoPath: String, family: String, device: String, processorC
     val xdcName = "constraints.xdc"
     writeFile(xdcName, outputDir, f"create_clock -period $period%.3f [get_ports $clkName]\n")
 
-    val inst = new Instance(outputDir)
+    val src = new VivadoScript()
 
-    inst.doCmd(s"read_xdc -mode out_of_context $xdcName")
-    inst.doCmd(s"read_verilog ${rtl.getAbsolutePath}")
-    inst.doCmd(s"synth_design -top ${module.definitionName} -part ${device} -mode out_of_context ${extraOptions}")
-    inst.doCmd(s"opt_design")
-    inst.doCmd(s"report_utilization -file Utilization.rpt")
-    inst.doCmd(s"report_timing_summary -file Timing.rpt")
-    inst.doCmd(s"set WNS [expr {[get_property SLACK [get_timing_paths]]}]")
-    inst.doCmd(s"write_checkpoint ${module.definitionName}$$WNS.dcp")
-    inst.exit()
+    src.addCmd(s"read_xdc -mode out_of_context $xdcName")
+    src.addSrc(rtl)
+    src.addCmd(s"synth_design -top ${module.definitionName} -part ${device} -mode out_of_context ${extraOptions}")
+    src.addCmd(s"opt_design")
+    src.addCmd(s"report_utilization -file Utilization.rpt")
+    src.addCmd(s"report_timing_summary -file Timing.rpt")
+    src.writeCheckpoint(module.definitionName)
+    Run(new File(outputDir), src.build())
   }
 
   def synthProject(topName: String, runName: String, includes: Seq[File], extraOptions: String = "") {
@@ -51,26 +49,20 @@ case class Vivado(vivadoPath: String, family: String, device: String, processorC
     output.toFile.mkdirs()
     val outputDir = output.toString
 
-    val inst = new Instance(outputDir)
+    val src = new VivadoScript()
 
-    inst.doCmd(s"create_project -in_memory -part ${device}")
+    src.addCmd(s"create_project -in_memory -part ${device}")
 
     for(file <- includes) {
-      val cmd: String = file.getName.split("\\.").last match {
-        case "v" | "sv" => "verilog"
-        case "dcp" => "checkpoint"
-        case "vhd" | "vhdl" => "vhdl"
-        case "xdc" => "xdc"
-      }
-      inst.doCmd(s"read_${cmd} ${file.getAbsolutePath}")
+      src.addSrc(file)
     }
 
-    inst.doCmd(s"synth_design -top ${topName} ${extraOptions}")
-    inst.doCmd(s"report_utilization -file Utilization.rpt")
-    inst.doCmd(s"report_timing_summary -file Timing.rpt")
-    inst.doCmd(s"set WNS [expr {[get_property SLACK [get_timing_paths]]}]")
-    inst.doCmd(s"write_checkpoint Synth$$WNS.dcp")
-    inst.exit()
+    src.addCmd(s"synth_design -top ${topName} ${extraOptions}")
+    src.addCmd(s"report_utilization -file Utilization.rpt")
+    src.addCmd(s"report_timing_summary -file Timing.rpt")
+    src.writeCheckpoint("Synth")
+    Run(new File(outputDir), src.build())
+
   }
 
   def placement(runName: String, checkpoint: File, directive: String, extraOptions: String = "") {
@@ -78,17 +70,16 @@ case class Vivado(vivadoPath: String, family: String, device: String, processorC
     output.toFile.mkdirs()
     val outputDir = output.toString
 
-    val inst = new Instance(outputDir)
+    val src = new VivadoScript()
 
-    inst.doCmd(s"open_checkpoint ${checkpoint.getAbsolutePath}")
+    src.addCmd(s"open_checkpoint ${checkpoint.getAbsolutePath}")
 
-    inst.doCmd(s"opt_design")
-    inst.doCmd(s"place_design -directive ${directive} ${extraOptions}")
-    inst.doCmd(s"phys_opt_design -directive AggressiveExplore")
-    inst.doCmd(s"report_timing_summary -file Timing.rpt")
-    inst.doCmd(s"set WNS [expr {[get_property SLACK [get_timing_paths]]}]")
-    inst.doCmd(s"write_checkpoint Placed$$WNS.dcp")
-    inst.exit()
+    src.addCmd(s"opt_design")
+    src.addCmd(s"place_design -directive ${directive} ${extraOptions}")
+    src.addCmd(s"phys_opt_design -directive AggressiveExplore")
+    src.addCmd(s"report_timing_summary -file Timing.rpt")
+    src.writeCheckpoint("Placed")
+    Run(new File(outputDir), src.build())
   }
 
   def route(runName: String, checkpoint: File, directive: String, extraOptions: String) {
@@ -96,32 +87,33 @@ case class Vivado(vivadoPath: String, family: String, device: String, processorC
     output.toFile.mkdirs()
     val outputDir = output.toString
 
-    val inst = new Instance(outputDir)
+    val src = new VivadoScript()
 
-    inst.doCmd(s"open_checkpoint ${checkpoint.getAbsolutePath}")
+    src.addCmd(s"open_checkpoint ${checkpoint.getAbsolutePath}")
 
-    inst.doCmd(s"route_design -directive ${directive} ${extraOptions}")
-    inst.doCmd(s"phys_opt_design -directive AggressiveExplore")
-    inst.doCmd(s"report_timing_summary -file Timing.rpt")
-    inst.doCmd(s"set WNS [expr {[get_property SLACK [get_timing_paths]]}]")
-    inst.doCmd(s"write_checkpoint Routed$$WNS.dcp")
-    inst.exit()
+    src.addCmd(s"route_design -directive ${directive} ${extraOptions}")
+    src.addCmd(s"phys_opt_design -directive AggressiveExplore")
+    src.addCmd(s"report_timing_summary -file Timing.rpt")
+    src.writeCheckpoint("Routed")
+    Run(new File(outputDir), src.build())
+
   }
 
-  def bitstream(outputName: String, checkpoint: File) {
+  def bitstream(outputName: String, checkpoint: File): Int = {
     val outputDir = "bitstreams"
 
-    val inst = new Instance(outputDir)
 
-    inst.doCmd(s"read_checkpoint ${checkpoint.getAbsolutePath}")
-    inst.doCmd(s"write_bitstream ${outputName}.bit")
-    inst.exit()
+    val src = new VivadoScript()
+
+    src.addCmd(s"read_checkpoint ${checkpoint.getAbsolutePath}")
+    src.addCmd(s"write_bitstream ${outputName}.bit")
+    Run(new File(outputDir), src.build())
   }
 
 
-  def findCheckpoints(folder: String): Map[String, File] = {
+  def findCheckpoints(folder: String): Seq[(Double, String, File)] = {
     val directories = new File(folder).listFiles.filter(_.isDirectory)
-    var results = Map.empty[String, File]
+    var results: ArrayBuffer[(Double, String, File)] = new ArrayBuffer
     for(dir <- directories) {
       val checkpoints = dir.listFiles.filter(f => f.getName.endsWith(".dcp"))
       for(checkpoint <- checkpoints) {
@@ -129,47 +121,61 @@ case class Vivado(vivadoPath: String, family: String, device: String, processorC
         if(checkpoints.length > 1) {
           name += checkpoint.getName
         }
-        results += (name -> checkpoint)
+        val toTry = Array("Synth", "Placed", "Routed")
+        var slackStr = checkpoint.getName.stripSuffix(".dcp")
+        for(prefix <- toTry) {
+          slackStr = slackStr.stripPrefix(prefix)
+        }
+        var slack = 0.0
+        try {
+          slack = slackStr.toDouble
+        } catch {
+          case _: NumberFormatException => //do nothing
+        }
+        results += ((slack, name, checkpoint))
       }
     }
-    results
+    results.sortBy(-_._1)
   }
 
-  class Instance(directory: String) {
-    private val cmd = Array(s"$vivadoPath/vivado", "-nojournal", "-mode", "tcl")
+  class VivadoScript() {
+    val builder = new StringBuilder
 
-    val p = PtyProcess.exec(cmd, null, directory)
-    private val inputStream = p.getOutputStream
-    private val outputStream = p.getInputStream
+    addCmd(s"set_param general.maxThreads ${processorCount}")
 
-    val s = new Scanner(outputStream)
-    s.useDelimiter("\nVivado%")
-
-    //read in the stuff printed at launch
-    s.next()
-
-    doCmd(s"set_param general.maxThreads ${processorCount}")
-
-
-    def doCmd(cmd: String): String = {
-      inputStream.write(s"$cmd\n".getBytes())
-      inputStream.flush()
-      s.next().split("\n", 2)(1)
+    def addCmd(cmd: String) {
+      builder ++= cmd
+      builder += '\n'
     }
 
-    def getSlowestPath(p: TimeNumber): TimeNumber = {
-      val result = doCmd("expr {[get_property SLACK [get_timing_paths]]}")
-      val lines = result.split("\n")
-      p - TimeNumber(lines(lines.length-1).toDouble)
+    def addSrc(file: File) {
+      val cmd: String = file.getName.split("\\.").last match {
+        case "v" | "sv" => "verilog"
+        case "dcp" => "checkpoint"
+        case "vhd" | "vhdl" => "vhdl"
+        case "xdc" => "xdc"
+      }
+      addCmd(s"read_${cmd} ${file.getAbsolutePath}")
     }
 
+    def writeCheckpoint(name: String): Unit = {
+      addCmd(s"set WNS [expr {[get_property SLACK [get_timing_paths]]}]")
+      addCmd(s"write_checkpoint $name$$WNS.dcp")
+    }
 
-    def exit() {
-      inputStream.write("exit\n".getBytes())
-      inputStream.flush()
+    def build(): String = {
+      builder.toString()
     }
   }
 
+  def Run(directory: File, script: String): Int = {
+    val scriptName = "run.tcl"
+    writeFile(directory.getAbsolutePath, scriptName, script)
+
+    val cmd = Array(s"$vivadoPath/vivado", "-nojournal", "-mode", "batch", "-source", scriptName)
+
+    Process(cmd, directory) !
+  }
 }
 
 object VivadoTest {
@@ -179,9 +185,9 @@ object VivadoTest {
       family="Virtex Ultrascale+",
       device="xcvu9p-fsgd2104-2LV-e"
     )
-    val results = vivado.findCheckpoints("/home/evan/projects/tellor_fpga/controller/hardware/output_FKSLR2/ooc")
-    for((name, path) <- results) {
-      printf("%s - %s\n", name, path.toString)
+    val results = vivado.findCheckpoints("/home/evan/projects/tellor_fpga/controller/hardware/output_FKSLR2/place")
+    for((slack, name, path) <- results) {
+      printf("%.3f %s - %s\n", slack, name, path.toString)
     }
 //    val f = new vivado.Instance("")
 //    val out = f.doCmd("read_verilog asdfasdf.v")
