@@ -7,7 +7,7 @@ import java.nio.file.Paths
 import spinal.core._
 
 import scala.collection.mutable.ArrayBuffer
-import scala.sys.process.Process
+import sys.process._
 
 
 case class Vivado(vivadoPath: String, family: String, device: String, processorCount: Int = 8) {
@@ -170,11 +170,11 @@ case class Vivado(vivadoPath: String, family: String, device: String, processorC
 
   def Run(directory: File, script: String): Int = {
     val scriptName = "run.tcl"
-    writeFile(directory.getAbsolutePath, scriptName, script)
+    writeFile(scriptName, directory.getAbsolutePath, script)
 
     val cmd = Array(s"$vivadoPath/vivado", "-nojournal", "-mode", "batch", "-source", scriptName)
 
-    Process(cmd, directory) !
+    Process(cmd, directory) ! ProcessLogger(line => ())
   }
 }
 
@@ -189,7 +189,8 @@ object VivadoTest {
     for((slack, name, path) <- results) {
       printf("%.3f %s - %s\n", slack, name, path.toString)
     }
-//    val f = new vivado.Instance("")
+
+    //    val f = new vivado.Instance("")
 //    val out = f.doCmd("read_verilog asdfasdf.v")
 //    f.exit()
 //    printf("output:\n%s\n", out)
