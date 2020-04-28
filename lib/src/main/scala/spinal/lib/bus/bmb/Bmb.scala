@@ -3,6 +3,7 @@ package spinal.lib.bus.bmb
 import spinal.core._
 import spinal.lib._
 import spinal.lib.bus.misc.AddressMapping
+import spinal.lib.bus.wishbone.Wishbone
 
 
 object WeakConnector{
@@ -95,6 +96,7 @@ case class BmbParameter(addressWidth : Int,
                         canWrite : Boolean = true,
                         canExclusive : Boolean = false,
                         canInvalidate : Boolean = false,
+                        canSync : Boolean = false,
                         invalidateLength : Int = 0,
                         invalidateAlignment : BmbParameter.BurstAlignement.Kind = BmbParameter.BurstAlignement.WORD,
                         maximumPendingTransactionPerId : Int = Int.MaxValue){
@@ -137,6 +139,7 @@ case class BmbCmd(p : BmbParameter) extends Bundle{
     WeakConnector(m, s, m.data,    s.data,    defaultValue = () => Bits(m.p.dataWidth bits).assignDontCare() , allowUpSize = false, allowDownSize = false, allowDrop = true )
     WeakConnector(m, s, m.mask,    s.mask,    defaultValue = () => Bits(m.p.maskWidth bits).assignDontCare() , allowUpSize = false, allowDownSize = false, allowDrop = true)
     WeakConnector(m, s, m.context, s.context, defaultValue = null, allowUpSize = true,  allowDownSize = false, allowDrop = false)
+    WeakConnector(m, s, m.exclusive, s.exclusive, defaultValue = null, allowUpSize = false,  allowDownSize = false, allowDrop = false)
   }
 
   def transferBeatCountMinusOne : UInt = {
@@ -167,6 +170,7 @@ case class BmbRsp(p : BmbParameter) extends Bundle{
     WeakConnector(m, s, m.opcode,  s.opcode,  defaultValue = null, allowUpSize = false, allowDownSize = false, allowDrop = false)
     WeakConnector(m, s, m.data,    s.data,    defaultValue = () => Bits(m.p.dataWidth bits).assignDontCare(), allowUpSize = false, allowDownSize = false, allowDrop = true )
     WeakConnector(m, s, m.context, s.context, defaultValue = null, allowUpSize = false,  allowDownSize = true, allowDrop = false)
+    WeakConnector(m, s, m.exclusive, s.exclusive, defaultValue = null, allowUpSize = false,  allowDownSize = false, allowDrop = false)
   }
 }
 
@@ -175,10 +179,29 @@ case class BmbInv(p: BmbParameter) extends Bundle{
   val address = UInt(p.addressWidth bits)
   val length = UInt(p.invalidateLength bits)
   val source = UInt(p.sourceWidth bits)
+
+  def weakAssignFrom(m : BmbInv): Unit ={
+    def s = this
+    WeakConnector(m, s, m.source , s.source , defaultValue = null, allowUpSize = false, allowDownSize = false, allowDrop = false)
+    WeakConnector(m, s, m.address, s.address, defaultValue = null, allowUpSize = false, allowDownSize = false, allowDrop = false)
+    WeakConnector(m, s, m.length , s.length , defaultValue = null, allowUpSize = false, allowDownSize = false, allowDrop = false)
+    WeakConnector(m, s, m.all    , s.all    , defaultValue = null, allowUpSize = false, allowDownSize = false, allowDrop = false)
+  }
 }
 
 case class BmbAck(p: BmbParameter) extends Bundle{
-//  val hit = Bool()
+  def weakAssignFrom(m : BmbAck): Unit ={
+
+  }
+}
+
+case class BmbSync(p: BmbParameter) extends Bundle{
+  val source = UInt(p.sourceWidth bits)
+
+  def weakAssignFrom(m : BmbSync): Unit ={
+    def s = this
+    WeakConnector(m, s, m.source , s.source , defaultValue = null, allowUpSize = false, allowDownSize = false, allowDrop = false)
+  }
 }
 
 case class Bmb(p : BmbParameter)  extends Bundle with IMasterSlave {
@@ -187,6 +210,7 @@ case class Bmb(p : BmbParameter)  extends Bundle with IMasterSlave {
 
   val inv = p.canInvalidate generate Stream(BmbInv(p))
   val ack = p.canInvalidate generate Stream(BmbAck(p)) //In order
+  val sync = p.canSync generate Stream(BmbSync(p)) //In order
 
   override def asMaster(): Unit = {
     master(cmd)
@@ -194,6 +218,9 @@ case class Bmb(p : BmbParameter)  extends Bundle with IMasterSlave {
     if(p.canInvalidate) {
       slave(inv)
       master(ack)
+    }
+    if(p.canSync) {
+      slave(sync)
     }
   }
 
@@ -208,6 +235,17 @@ case class Bmb(p : BmbParameter)  extends Bundle with IMasterSlave {
 
     s.cmd.weakAssignFrom(m.cmd)
     m.rsp.weakAssignFrom(s.rsp)
+
+    if(p.canInvalidate){
+      m.inv.arbitrationFrom(s.inv)
+      s.ack.arbitrationFrom(m.ack)
+      m.inv.weakAssignFrom(s.inv)
+      s.ack.weakAssignFrom(m.ack)
+    }
+    if(p.canSync){
+      m.sync.arbitrationFrom(s.sync)
+      m.sync.weakAssignFrom(s.sync)
+    }
   }
   def >>(s : Bmb) : Unit = s << this
 
@@ -235,6 +273,91 @@ case class Bmb(p : BmbParameter)  extends Bundle with IMasterSlave {
     val ret = cloneOf(this)
     this.cmd >> ret.cmd
     this.rsp << ret.rsp.s2mPipe()
+    ret
+  }
+
+  def resize(dataWidth : Int): Bmb = this match {
+    case _ if dataWidth == p.dataWidth => this
+    case _ if dataWidth < p.dataWidth => {
+      val bridge = BmbDownSizerBridge(
+        inputParameter = p,
+        outputParameter = BmbDownSizerBridge.outputParameterFrom(p, dataWidth)
+      ).setCompositeName(this, "downSizer", true)
+      bridge.io.input << this
+      bridge.io.output
+    }
+
+    case _ if dataWidth > p.dataWidth => {
+      val bridge = BmbUpSizerBridge(
+        inputParameter = p,
+        outputParameter = BmbUpSizerBridge.outputParameterFrom(p, dataWidth)
+      ).setCompositeName(this, "upSizer", true)
+      bridge.io.input << this
+      bridge.io.output
+    }
+  }
+
+  def unburstify() : Bmb = {
+    val bridge = BmbUnburstify(p).setCompositeName(this, "unburstify", true)
+    bridge.io.input << this
+    bridge.io.output
+  }
+
+  def toWishbone() : Wishbone = {
+    val bridge = BmbToWishbone(p).setCompositeName(this, "toWishbone", true)
+    bridge.io.input << this
+    bridge.io.output
+  }
+
+  def pipelined(cmdValid : Boolean = false,
+                cmdReady : Boolean = false,
+                cmdHalfRate : Boolean = false,
+                rspValid : Boolean = false,
+                rspReady : Boolean = false,
+                rspHalfRate : Boolean = false,
+                invValid : Boolean = false,
+                invReady : Boolean = false,
+                invHalfRate : Boolean = false,
+                ackValid : Boolean = false,
+                ackReady : Boolean = false,
+                ackHalfRate : Boolean = false,
+                syncValid : Boolean = false,
+                syncReady : Boolean = false,
+                syncHalfRate : Boolean = false
+               ): Bmb = {
+    val ret = Bmb(p)
+    ret.cmd << cmd.pipelined(
+      m2s = cmdValid,
+      s2m = cmdReady,
+      halfRate = cmdHalfRate
+    )
+
+    rsp << ret.rsp.pipelined(
+      m2s = rspValid,
+      s2m = rspReady,
+      halfRate = rspHalfRate
+    )
+
+    if(p.canInvalidate){
+      inv << ret.inv.pipelined(
+        m2s = invValid,
+        s2m = invReady,
+        halfRate = invHalfRate
+      )
+      ret.ack << ack.pipelined(
+        m2s = ackValid,
+        s2m = ackReady,
+        halfRate = ackHalfRate
+      )
+    }
+    
+    if(p.canSync){
+      sync << ret.sync.pipelined(
+        m2s = syncValid,
+        s2m = syncReady,
+        halfRate = syncHalfRate
+      )
+    }    
     ret
   }
 }
